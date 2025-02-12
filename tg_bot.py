@@ -1,13 +1,16 @@
 import logging
 import requests
+import time
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, CallbackContext
-
-TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 
 # Logging settings
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Bot token and log file path
+BOT_TOKEN = ""  # Bot token
+LOG_FILE_PATH = ""  # Path to the log file
 
 # Conversation states
 NODE_ID, INTERVAL = range(2)
@@ -73,6 +76,14 @@ async def interval(update: Update, context: CallbackContext) -> int:
     )
     context.user_data['job'] = job  # Save the job
 
+    # Start the log monitoring job
+    context.job_queue.run_repeating(
+        check_logs_for_errors,  # Function to run
+        interval=300,  # Check every 5 minutes (300 seconds)
+        first=0,  # First run time (0 = immediately)
+        chat_id=update.message.chat_id  # Chat ID
+    )
+
     await update.message.reply_text(
         f"Setup complete! You will receive reports every {interval_input}.",
         reply_markup=ReplyKeyboardRemove()
@@ -88,6 +99,11 @@ async def interval(update: Update, context: CallbackContext) -> int:
 
 async def send_report_immediately(update: Update, context: CallbackContext) -> None:
     """Send a report immediately to the user."""
+    # Check if node_id exists in user_data
+    if 'node_id' not in context.user_data:
+        await update.message.reply_text("Node ID not found. Please enter your Node ID again:")
+        return NODE_ID  # Return to the node_id state
+
     node_id = context.user_data['node_id']
     url = BASE_URL + node_id
     try:
@@ -118,11 +134,26 @@ async def send_report(context: CallbackContext) -> None:
     except Exception as e:
         logger.error(f"Error while sending report: {e}")
 
+async def check_logs_for_errors(context: CallbackContext) -> None:
+    """Check the log file for errors and send a notification if found."""
+    try:
+        with open(LOG_FILE_PATH, 'r') as file:
+            lines = file.readlines()[-200:]  # Read the last 200 lines
+            for line in lines:
+                if "ERROR" in line:
+                    await context.bot.send_message(
+                        chat_id=context.job.chat_id,
+                        text="ERROR: Please restart your node!"
+                    )
+                    break  # Send only one notification per check
+    except Exception as e:
+        logger.error(f"Error while checking logs: {e}")
+
 async def menu(update: Update, context: CallbackContext) -> None:
     """Show the menu options to the user without any text."""
     menu_options = [['New Report']]
     await update.message.reply_text(
-        "-",  # Empty string to avoid displaying any text
+        "-",
         reply_markup=ReplyKeyboardMarkup(menu_options, one_time_keyboard=True, resize_keyboard=True)
     )
 
@@ -130,7 +161,9 @@ async def handle_menu(update: Update, context: CallbackContext) -> None:
     """Handle menu options."""
     choice = update.message.text
     if choice == 'New Report':
-        await send_report_immediately(update, context)
+        result = await send_report_immediately(update, context)
+        if result == NODE_ID:  # If node_id is missing, return to node_id state
+            return NODE_ID
 
 async def cancel(update: Update, context: CallbackContext) -> int:
     """Cancel the conversation."""
@@ -140,8 +173,8 @@ async def cancel(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 def main() -> None:
-    # Replace with your bot token
-    application = Application.builder().token(TOKEN).build()
+    # Build the application
+    application = Application.builder().token(BOT_TOKEN).build()
 
     # Conversation handler
     conv_handler = ConversationHandler(
